@@ -1,5 +1,7 @@
+import calendar
 import json
 import sys
+import uuid
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,13 +16,22 @@ import util_functions
 from trip_classes import Trip, Trips, Results, TripType, TripJSONEncoder, trip_json_decoder
 
 
+@staticmethod
+def save_soup_html(soup, prefix="debug"):
+    filename = f"{prefix}_{uuid.uuid4().hex}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(soup.prettify())
+    print(f"Saved soup HTML to {filename}")
+
+
 class TooFarInAdvanceException(Exception):
     """Exception raised when the date is too far in advance."""
     pass
 
 
 class TrainTicketFinder:
-    def __init__(self, date, no_changes=True, station_from='warrington+bank+quay', station_to='london+euston',
+    def __init__(self, from_date, to_date, no_changes=True, station_from='warrington+bank+quay',
+                 station_to='london+euston',
                  disable_cache=False, max_stops=4, debug_trips=False):
         self.no_changes = no_changes
         self.disable_cache = disable_cache
@@ -51,7 +62,7 @@ class TrainTicketFinder:
             raise
 
         # Create date pairs for analysis
-        self.date_pairs = util_functions.create_date_pairs(date)
+        self.date_pairs = util_functions.create_date_pairs(from_date, to_date)
         self.debug_trips = debug_trips
 
     def load_cache(self):
@@ -66,8 +77,6 @@ class TrainTicketFinder:
 
     def save_cache(self):
         """Save cache to a JSON file."""
-        # Read existing data
-
         try:
             with open(self.cache_file, 'r') as file:
                 existing_cache = json.load(file, object_hook=trip_json_decoder)
@@ -75,15 +84,17 @@ class TrainTicketFinder:
         except FileNotFoundError:
             existing_cache = self.cache
 
-        # Write to temporary file first
-        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        # Generate a unique temp file path
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, next(tempfile._get_candidate_names()) + ".json")
+
         try:
-            with open(temp_file.name, 'w') as file:
+            with open(temp_path, 'w') as file:
                 json.dump(existing_cache, file, cls=TripJSONEncoder)
-            # Replace original with new file
-            shutil.move(temp_file.name, self.cache_file)
-        except:
-            os.unlink(temp_file.name)
+            shutil.move(temp_path, self.cache_file)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
             raise
 
     def get_number_of_stops(self, url):
@@ -127,14 +138,21 @@ class TrainTicketFinder:
         soup = BeautifulSoup(response.text, 'html.parser')
         return soup
 
-    def _get_trips_from_soup(self, soup, trip_type, date_str) -> [Trip]:
-        trips: [Trip] = []
+    def _get_trips_from_soup(self, soup, trip_type,date, date_str) -> list[Trip]:
+        trips: list[Trip] = []
 
         result_elements = soup.find_all('li', id=re.compile(r'^result\d+$'))
 
         for result in result_elements:
+            # this is a workaround for the issue with the link being in a different <li> element (or beautifulsoup bug or malformed HTML)
+            link = result.find('a', class_='change_link')
+            if link:
+                parent_li = link.find_parent('li')
+                if parent_li and parent_li.get('id') != result.get('id'):
+                    # Link is in a different <li>, ignore it
+                    link = None
 
-            if result.find('a', class_='change_link') and self.no_changes:
+            if link and self.no_changes:
                 continue
 
             trip = Trip(
@@ -201,7 +219,7 @@ class TrainTicketFinder:
 
         return trips
 
-    def _fetch_train_prices(self, date, url, trip_type) -> [Trip]:
+    def _fetch_train_prices(self, date, url, trip_type) -> list[Trip]:
         """Fetch train prices for the given date."""
         date_str = date.strftime("%Y-%m-%d")
         cache_key = f"{date_str}_{url}"
@@ -212,10 +230,13 @@ class TrainTicketFinder:
             for trip in trips: print(trip.to_string(self.debug_trips))
             return trips
 
-        trips: [Trip] = []
+        trips: list[Trip] = []
 
         url_request = url + f'/{date_str}'
         soup = self._get_soup_from_url(url_request)
+
+        if self.debug_trips:
+            save_soup_html(soup, prefix=f"debug_{trip_type.name.lower()}_{date_str}")
 
         # let's check this date is too far in advance
         if soup.find('p', class_='error-message'):
@@ -223,17 +244,27 @@ class TrainTicketFinder:
 
         # Find all small elements that might contain fare information
         # Find the result element
-        trips += self._get_trips_from_soup(soup, trip_type, date_str)
+        trips += self._get_trips_from_soup(soup, trip_type, date, date_str)
 
+        links = []
         if trip_type == TripType.OUTBOUND:
-            earlier_later_link = soup.find('a', {'data-type': 'out-earlier'})['href']
+            link = soup.find('a', {'data-type': 'out-later'})
+            if link and link.get('href'):
+                links.append(link['href'])
         else:
-            earlier_later_link = soup.find('a', {'data-type': 'out-later'})['href']
+            link_earlier = soup.find('a', {'data-type': 'out-earlier'})
+            link_later = soup.find('a', {'data-type': 'out-later'})
+            if link_earlier and link_earlier.get('href'):
+                links.append(link_earlier['href'])
+            if link_later and link_later.get('href'):
+                links.append(link_later['href'])
 
-        if earlier_later_link:
-            soup = self._get_soup_from_url(self.base_url + earlier_later_link)
-            trips += self._get_trips_from_soup(soup, trip_type, date_str)
+        for href in links:
+            soup_extra = self._get_soup_from_url(self.base_url + href)
+            trips += self._get_trips_from_soup(soup_extra, trip_type, date, date_str)
 
+        #make sure we have unique trips
+        trips = list(set(trips))
 
         # Save the fetched data to the cache
         self.cache[cache_key] = trips
@@ -242,6 +273,9 @@ class TrainTicketFinder:
         return trips
 
     def fetch_trip_data(self) -> Results:
+
+        if self.date_pairs is None or len(self.date_pairs) == 0:
+            raise ValueError("No date pairs available for analysis. Please check the date range.")
 
         trip_results: Results = Results(
             same_day_tuesday=[],
@@ -273,7 +307,7 @@ class TrainTicketFinder:
 
             # Create Trips objects for the selected trips
             trips = [Trips(outbound=out, return_trip=ret) for out in min_outbound for ret in min_return]
-            trips = sorted(trips, key=lambda x: (x.cost()))[:2]
+            trips = sorted(trips, key=lambda x: (x.cost()))[:4]  # Keep only the cheapest 4 trips
 
             if is_tuesday:
                 trip_results.same_day_tuesday.extend(trips)
@@ -293,7 +327,7 @@ class TrainTicketFinder:
             return_trip = {trips.return_trip for trips in trip_results.same_day_wednesday if
                            trips.return_trip.date == date2}
             trips = [Trips(outbound=out, return_trip=ret) for out in outbound for ret in return_trip]
-            trips = sorted(trips, key=lambda x: (x.cost()))[:2]
+            trips = sorted(trips, key=lambda x: (x.cost()))[:4]
             trip_results.overnight_stays.extend(trips)
         return trip_results
 
@@ -319,12 +353,12 @@ if __name__ == "__main__":
     group = parser.add_argument_group('date arguments')
     group.add_argument('--month', type=int, help='Starting month (1-12)', metavar='MONTH')
     group.add_argument('--year', type=int, help='Starting year', metavar='YEAR')
-    group.add_argument('--day', type=int, help='Day of the month (1-31)', default=1, metavar='DAY')
+    group.add_argument('--day', type=int, help='Day of the month (1-31)', metavar='DAY')
 
     group = parser.add_argument_group('search options')
     group.add_argument('--station_from', type=str, help='Starting station (use + for spaces)',
                        default='warrington+bank+quay', metavar='STATION')
-    group.add_argument('--station_to',  type=str, help='Ending station (use + for spaces)',
+    group.add_argument('--station_to', type=str, help='Ending station (use + for spaces)',
                        default='london+euston', metavar='STATION')
 
     group.add_argument('--max_stops', type=int, help='Maximum stops for a train journey', default=5, metavar='STOPS')
@@ -338,8 +372,12 @@ if __name__ == "__main__":
         parser.print_help()
         sys.exit(1)
 
-    date = datetime(args.year, args.month, args.day)
-    scraper = TrainTicketFinder(date,args.no_changes, args.station_from, args.station_to, args.nocache, args.max_stops)
+    _, last_day = calendar.monthrange(args.year, args.month)
+    date_from = datetime(args.year, args.month, 1 if args.day is None else args.day)
+    date_to = datetime(args.year, args.month, last_day) if args.day is None else date_from
+
+    scraper = TrainTicketFinder(date_from, date_to, args.no_changes, args.station_from, args.station_to, args.nocache,
+                                args.max_stops, args.debug_trips)
 
     results = scraper.fetch_trip_data()
 
