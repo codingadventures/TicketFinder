@@ -86,6 +86,12 @@ class TrainTicketFinder:
             os.unlink(temp_file.name)
             raise
 
+    @staticmethod
+    def save_html_to_file(html_content, file_name="soup_output.html"):
+        """Save HTML content to a file for inspection."""
+        with open(file_name, "w", encoding="utf-8") as file:
+            file.write(html_content)
+
     def get_number_of_stops(self, url):
         try:
             cache_key = f"stops_{url}"
@@ -123,16 +129,28 @@ class TrainTicketFinder:
             print(f"Failed to fetch data for {url}: Status code {response.status_code}")
             return []
 
+        if self.debug_trips:
+            # Save the raw HTML content to a file
+            self.save_html_to_file(response.text, "soup_output.html")
+
+
         # Parse HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = BeautifulSoup(response.text, 'lxml')
         return soup
 
     def _get_trips_from_soup(self, soup, trip_type, date_str) -> [Trip]:
         trips: [Trip] = []
 
+        if soup.find('div', id='warning'):
+            return trips
+
         result_elements = soup.find_all('li', id=re.compile(r'^result\d+$'))
 
         for result in result_elements:
+
+            if self.debug_trips:
+                # Print the HTML of each found element
+                print(f"Result {result.get('id')}:\n{result.prettify()}\n")
 
             if result.find('a', class_='change_link') and self.no_changes:
                 continue
@@ -143,7 +161,7 @@ class TrainTicketFinder:
                 travel_time_str="",  # will be updated later
                 departure_arrival="",
                 travel_time_minutes=0,  # will be updated later
-                date=date.strftime("%B %d, %Y"),  # format: May 25, 2025
+                date=date_str.strftime("%B %d, %Y"),  # format: May 25, 2025
                 num_stops=0
             )
 
@@ -201,9 +219,9 @@ class TrainTicketFinder:
 
         return trips
 
-    def _fetch_train_prices(self, date, url, trip_type) -> [Trip]:
+    def _fetch_train_prices(self, trip_date, url, trip_type) -> [Trip]:
         """Fetch train prices for the given date."""
-        date_str = date.strftime("%Y-%m-%d")
+        date_str = trip_date.strftime("%Y-%m-%d")
         cache_key = f"{date_str}_{url}"
 
         # Check if the data is in the cache
@@ -223,7 +241,7 @@ class TrainTicketFinder:
 
         # Find all small elements that might contain fare information
         # Find the result element
-        trips += self._get_trips_from_soup(soup, trip_type, date_str)
+        trips += self._get_trips_from_soup(soup, trip_type, trip_date)
 
         if trip_type == TripType.OUTBOUND:
             earlier_later_link = soup.find('a', {'data-type': 'out-earlier'})['href']
@@ -232,8 +250,7 @@ class TrainTicketFinder:
 
         if earlier_later_link:
             soup = self._get_soup_from_url(self.base_url + earlier_later_link)
-            trips += self._get_trips_from_soup(soup, trip_type, date_str)
-
+            trips += self._get_trips_from_soup(soup, trip_type, trip_date)
 
         # Save the fetched data to the cache
         self.cache[cache_key] = trips
@@ -308,7 +325,7 @@ if __name__ == "__main__":
               '\t--day DAY         Day of the month (1-31, default: 1)\n'
               '\t--station_from    Starting station, use + for spaces (default: warrington+bank+quay)\n'
               '\t--station_to      Final station, use + for spaces (default: london+euston)\n'
-              '\t--max_stops       Maximum stops for a train journey (default: 5)\n'
+              '\t--max_stops       Maximum stops for a train journey (default: 8)\n'
               '\t--nocache         Disable caching of results\n'
               '\t--debug_trips     Enable verbose debug output',
         formatter_class=util_functions.CustomFormatter,
@@ -327,7 +344,7 @@ if __name__ == "__main__":
     group.add_argument('--station_to',  type=str, help='Ending station (use + for spaces)',
                        default='london+euston', metavar='STATION')
 
-    group.add_argument('--max_stops', type=int, help='Maximum stops for a train journey', default=5, metavar='STOPS')
+    group.add_argument('--max_stops', type=int, help='Maximum stops for a train journey', default=8, metavar='STOPS')
     group.add_argument('--no_changes', action='store_true', help='Only show direct trains', default=True)
 
     group = parser.add_argument_group('debug options')
@@ -338,8 +355,7 @@ if __name__ == "__main__":
         parser.print_help()
         sys.exit(1)
 
-    date = datetime(args.year, args.month, args.day)
-    scraper = TrainTicketFinder(date,args.no_changes, args.station_from, args.station_to, args.nocache, args.max_stops)
+    scraper = TrainTicketFinder( datetime(args.year, args.month, args.day) ,args.no_changes, args.station_from, args.station_to, args.nocache, args.max_stops, args.debug_trips)
 
     results = scraper.fetch_trip_data()
 
