@@ -12,7 +12,7 @@ import urllib.parse
 from datetime import datetime
 import util_functions
 from trip_classes import Trip, Trips, Results, TripType, TripJSONEncoder, trip_json_decoder
-
+import calendar
 
 class TooFarInAdvanceException(Exception):
     """Exception raised when the date is too far in advance."""
@@ -51,7 +51,8 @@ class TrainTicketFinder:
             raise
 
         # Create date pairs for analysis
-        date_to = datetime(in_date.year, in_date.month, 31 if in_date.day == 1 else in_date.day)
+        last_day = calendar.monthrange(in_date.year, in_date.month)[1]
+        date_to = datetime(in_date.year, in_date.month, last_day if in_date.day == 1 else in_date.day)
         self.date_pairs = util_functions.create_date_pairs(in_date, date_to)
         self.debug_trips = debug_trips
 
@@ -364,9 +365,9 @@ if __name__ == "__main__":
     best_tuesdays = sorted(results.same_day_tuesday, key=lambda trip: trip.cost())
     best_wednesdays = sorted(results.same_day_wednesday, key=lambda trip: trip.cost())
 
-    # let's keep only the best wednesday that cose less than the best tuesday
-    if best_tuesdays and best_wednesdays:
-        best_wednesdays = [trip for trip in best_wednesdays if trip.cost() < best_tuesdays[0].cost()]
+    # let's keep only the best wednesday that cost less than the best tuesday
+    #if best_tuesdays and best_wednesdays:
+    #best_wednesdays = [trip for trip in best_wednesdays if trip.cost() < best_tuesdays[0].cost()]
 
     best_overnight = sorted(results.overnight_stays, key=lambda trip: trip.cost())
     util_functions.print_trip_results(best_tuesdays[:1], best_wednesdays[:1], best_overnight[:1], args.debug_trips)
