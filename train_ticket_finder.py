@@ -20,7 +20,7 @@ class TooFarInAdvanceException(Exception):
 
 
 class TrainTicketFinder:
-    def __init__(self, date, no_changes=True, station_from='warrington+bank+quay', station_to='london+euston',
+    def __init__(self, in_date, no_changes=True, station_from='warrington+bank+quay', station_to='london+euston',
                  disable_cache=False, max_stops=4, debug_trips=False):
         self.no_changes = no_changes
         self.disable_cache = disable_cache
@@ -51,7 +51,8 @@ class TrainTicketFinder:
             raise
 
         # Create date pairs for analysis
-        self.date_pairs = util_functions.create_date_pairs(date)
+        date_to = datetime(in_date.year, in_date.month, 31 if in_date.day == 1 else in_date.day)
+        self.date_pairs = util_functions.create_date_pairs(in_date, date_to)
         self.debug_trips = debug_trips
 
     def load_cache(self):
